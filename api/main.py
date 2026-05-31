@@ -1,6 +1,9 @@
 import time
 import uuid
 import logging
+import sqlite3
+import json
+import os
 import numpy as np
 import pandas as pd
 import joblib
@@ -55,9 +58,109 @@ SEVERITY_THRESHOLDS = [
     ("LOW",      0.0),
 ]
 
-# ── In-memory stores ──────────────────────────────────────────────────────────
-alert_store: List[Dict[str, Any]] = []
-stats_store: Dict[str, int] = defaultdict(int)
+# ── SQLite persistent storage ─────────────────────────────────────────────────
+DB_PATH = "./data/alerts.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS alerts (
+            alert_id    TEXT PRIMARY KEY,
+            timestamp   TEXT,
+            model_used  TEXT,
+            attack_type TEXT,
+            severity    TEXT,
+            confidence  REAL,
+            shap_explanation TEXT,
+            raw_flow    TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS stats (
+            attack_type TEXT PRIMARY KEY,
+            count       INTEGER DEFAULT 0
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def db_save_alert(alert: dict):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        INSERT OR IGNORE INTO alerts VALUES (?,?,?,?,?,?,?,?)
+    """, (
+        alert["alert_id"],
+        alert["timestamp"],
+        alert["model_used"],
+        alert["attack_type"],
+        alert["severity"],
+        alert["confidence"],
+        json.dumps(alert["shap_explanation"]),
+        json.dumps(alert["raw_flow"])
+    ))
+    conn.execute("""
+        INSERT INTO stats (attack_type, count) VALUES (?, 1)
+        ON CONFLICT(attack_type) DO UPDATE SET count = count + 1
+    """, (alert["attack_type"],))
+    conn.commit()
+    conn.close()
+
+def db_get_alert_count():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM alerts")
+        count = c.fetchone()[0]
+        conn.close()
+        return count
+    except:
+        return 0
+
+def db_get_alerts(limit=100, severity=None):
+    conn = sqlite3.connect(DB_PATH)
+    if severity:
+        rows = conn.execute(
+            "SELECT * FROM alerts WHERE severity=? ORDER BY timestamp DESC LIMIT ?",
+            (severity, limit)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM alerts ORDER BY timestamp DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+    conn.close()
+    return [{
+        "alert_id":         r[0],
+        "timestamp":        r[1],
+        "model_used":       r[2],
+        "attack_type":      r[3],
+        "severity":         r[4],
+        "confidence":       r[5],
+        "shap_explanation": json.loads(r[6]),
+        "raw_flow":         json.loads(r[7]),
+    } for r in rows]
+
+def db_get_stats():
+    conn = sqlite3.connect(DB_PATH)
+    attack_dist = dict(conn.execute(
+        "SELECT attack_type, count FROM stats"
+    ).fetchall())
+    sev_dist = dict(conn.execute(
+        "SELECT severity, COUNT(*) FROM alerts GROUP BY severity"
+    ).fetchall())
+    total = conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
+    conn.close()
+    return attack_dist, sev_dist, total
+
+def db_clear():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM alerts")
+    conn.execute("DELETE FROM stats")
+    conn.commit()
+    conn.close()
+
+# Initialize DB on startup
+init_db()
 
 # ── Load models ───────────────────────────────────────────────────────────────
 import os
@@ -66,17 +169,19 @@ MODEL_DIR = os.environ.get("MODEL_DIR", "./model")
 try:
     models = {
         "xgboost":       joblib.load(f"{MODEL_DIR}/model_xgb.pkl"),
-        "random_forest": joblib.load(f"{MODEL_DIR}/model_sklearn.pkl"),
+        "random_forest": joblib.load(f"{MODEL_DIR}/model_sklearn.pkl") if os.path.exists(f"{MODEL_DIR}/model_sklearn.pkl") else None,
     }
     label_encoder = joblib.load(f"{MODEL_DIR}/label_encoder.pkl")
     feature_names = joblib.load(f"{MODEL_DIR}/feature_names.pkl")
 
     # SHAP explainers — created once at startup
     explainers = {
-        name: shap.TreeExplainer(model)
+        name: shap.TreeExplainer(model) if model is not None else None
         for name, model in models.items()
     }
     logger.info(f"✅ Models loaded successfully")
+    init_db()
+    logger.info(f"✅ SQLite database initialized at {DB_PATH}")
     logger.info(f"   Classes : {list(label_encoder.classes_)}")
     logger.info(f"   Features: {len(feature_names)}")
 except Exception as e:
@@ -200,7 +305,7 @@ def health():
     return {
         "status":        "healthy",
         "models_loaded": list(models.keys()),
-        "total_alerts":  len(alert_store),
+        "total_alerts":  db_get_alert_count(),
         "timestamp":     datetime.utcnow().isoformat(),
     }
 
@@ -237,8 +342,7 @@ def predict(
                 "shap_explanation": result["shap_features"],
                 "raw_flow":         body.features,
             }
-            alert_store.append(alert)
-            stats_store[result["pred_label"]] += 1
+            db_save_alert(alert)
             logger.info(f"ALERT | {result['severity']} | {result['pred_label']} | conf={result['confidence']}")
 
         return {
@@ -291,8 +395,7 @@ def predict_batch(
                     "shap_explanation": result["shap_features"],
                     "raw_flow":         flow,
                 }
-                alert_store.append(alert)
-                stats_store[result["pred_label"]] += 1
+                db_save_alert(alert)
 
             results.append({
                 "prediction":       result["pred_label"],
@@ -323,23 +426,13 @@ def get_alerts(
 ):
     verify_api_key(x_api_key)
 
-    alerts = alert_store.copy()
-
-    if severity:
-        severity = severity.upper()
-        valid    = [s for s, _ in SEVERITY_THRESHOLDS]
-        if severity not in valid:
-            raise HTTPException(status_code=400, detail=f"Invalid severity. Choose: {valid}")
-        alerts = [a for a in alerts if a["severity"] == severity]
-
-    alerts = sorted(alerts, key=lambda x: x["timestamp"], reverse=True)
-    alerts = alerts[:limit]
-
+    alerts = db_get_alerts(limit=limit, severity=severity if severity != "ALL" else None)
+    attack_dist, sev_dist, total = db_get_stats()
     return {
-        "total":    len(alert_store),
-        "returned": len(alerts),
-        "alerts":   alerts,
-    }
+    "total":    total,
+    "returned": len(alerts),
+    "alerts":   alerts,
+}
 
 
 @app.get("/stats")
@@ -350,17 +443,14 @@ def get_stats(
 ):
     verify_api_key(x_api_key)
 
-    severity_dist: Dict[str, int] = defaultdict(int)
-    for alert in alert_store:
-        severity_dist[alert["severity"]] += 1
-
+    attack_dist, sev_dist, total = db_get_stats()
     return {
-        "total_alerts":        len(alert_store),
-        "attack_distribution": dict(stats_store),
-        "severity_breakdown":  dict(severity_dist),
-        "models_available":    list(models.keys()),
-        "classes":             list(label_encoder.classes_),
-        "timestamp":           datetime.utcnow().isoformat(),
+    "total_alerts":        total,
+    "attack_distribution": attack_dist,
+    "severity_breakdown":  sev_dist,
+    "models_available":    list(models.keys()),
+    "classes":             list(label_encoder.classes_),
+    "timestamp":           datetime.utcnow().isoformat(),
     }
 
 
@@ -368,7 +458,6 @@ def get_stats(
 def clear_alerts(x_api_key: Optional[str] = Header(None)):
     """Dev only — clears in-memory alert store."""
     verify_api_key(x_api_key)
-    alert_store.clear()
-    stats_store.clear()
+    db_clear()
     logger.info("Alert store cleared")
     return {"message": "Alert store cleared", "timestamp": datetime.utcnow().isoformat()}
