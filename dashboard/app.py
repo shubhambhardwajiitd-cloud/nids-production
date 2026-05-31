@@ -1,3 +1,4 @@
+import os
 import time
 import requests
 import pandas as pd
@@ -15,8 +16,9 @@ st.set_page_config(
 )
 
 # ── Config ────────────────────────────────────────────────────────────────────
-API_URL = "http://localhost:8000"
-API_KEY = "dev-key-free-001"
+import os
+API_URL = os.getenv("NIDS_API_URL", "http://localhost:8000")
+API_KEY = os.getenv("NIDS_API_KEY", "dev-key-free-001")
 HEADERS = {"x-api-key": API_KEY}
 
 SEVERITY_COLOR = {
