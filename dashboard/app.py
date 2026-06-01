@@ -313,7 +313,7 @@ with cc1:
 with cc2:
     limit = st.slider("Limit", 10, 100, 50, label_visibility="collapsed")
 with cc3:
-    refresh = st.toggle("⟳", value=True, help="Auto refresh every 5s")
+    refresh = st.button("🔄 Refresh")
 with cc4:
     if st.button("🗑 Clear Alert Store"):
         try:
@@ -651,8 +651,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ── Auto refresh ──────────────────────────────────────────────────────────────
+# ── Manual refresh ────────────────────────────────────────────────────────────
 if refresh:
-    time.sleep(5)
     st.cache_data.clear()
     st.rerun()
