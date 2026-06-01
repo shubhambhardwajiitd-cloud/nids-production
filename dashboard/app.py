@@ -1,3 +1,4 @@
+import random
 import os
 import time
 import requests
@@ -638,6 +639,52 @@ with col_shap:
             '// waiting for alerts</div>',
             unsafe_allow_html=True
         )
+
+
+# ── Try It Yourself ───────────────────────────────────────────────────────────
+st.markdown("<br>", unsafe_allow_html=True)
+st.markdown('<div class="panel-title">🎲 TRY IT YOURSELF</div>',
+            unsafe_allow_html=True)
+
+if st.button("Generate Random Flow & Predict", type="primary"):
+    try:
+        import pandas as pd
+        
+        # Load a random row from sample data
+        df = pd.read_csv("data/sample_data.csv")
+        row = df.sample(1).iloc[0]
+        true_label = row["Label"]
+        features = row.drop("Label").to_dict()
+        
+        # Send to API
+        resp = requests.post(
+            f"{API_URL}/predict?model_name=xgboost",
+            headers={**HEADERS, "Content-Type": "application/json"},
+            json={"features": features},
+            timeout=10
+        )
+        result = resp.json()
+        
+        # Show result
+        r1, r2, r3 = st.columns(3)
+        with r1:
+            st.metric("True Label", true_label)
+        with r2:
+            st.metric("Predicted", result["prediction"])
+        with r3:
+            st.metric("Confidence", f"{result['confidence']:.1%}")
+        
+        if result.get("shap_explanation"):
+            st.markdown("**Why this was flagged:**")
+            for s in result["shap_explanation"]:
+                direction = "⬆️ risk" if s["shap_value"] > 0 else "⬇️ risk"
+                st.write(f"- **{s['feature']}**: `{s['shap_value']:+.4f}` {direction}")
+        
+        with st.expander("🔍 Raw API Response"):
+            st.json(result)
+            
+    except Exception as e:
+        st.error(f"Error: {e}")
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown(f"""
