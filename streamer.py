@@ -9,6 +9,7 @@ Usage:
     py -3.11 streamer.py --limit 50              # limit rows
 """
 
+import os
 import argparse
 import time
 import requests
@@ -18,7 +19,7 @@ from datetime import datetime
 from collections import defaultdict
 
 # ── Config ────────────────────────────────────────────────────────────────────
-API_URL   = "http://localhost:8000"
+API_URL = os.getenv("NIDS_API_URL", "http://localhost:8000")
 API_KEY   = "dev-key-free-001"
 DATA_PATH = r"C:\Users\Shubham Bhardwaj\Desktop\Projects_tech\NIDS\data\sample_data.csv"
 
